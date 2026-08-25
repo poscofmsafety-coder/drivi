@@ -42,22 +42,13 @@ select {
   outline: none;
 }
 
-.leaflet-container {
-  width: 100% !important;
-  height: 100% !important;
-  background: #e9edf1;
-  font-family: Arial, "Noto Sans KR", sans-serif;
-}
-
-.leaflet-popup-content-wrapper {
+.info-window {
   border-radius: 16px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
-}
-
-.leaflet-popup-content {
-  margin: 13px 15px;
+  padding: 13px 15px;
   font-size: 13px;
   line-height: 1.55;
+  background: #fff;
 }
 
 @media (max-width: 900px) {
