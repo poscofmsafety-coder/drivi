@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import "leaflet/dist/leaflet.css";
 import {
   Navigation,
   MapPin,
@@ -75,7 +74,6 @@ const VISITED_STORAGE_KEY = "driveai_visited_places";
 export default function Home() {
   const mapElement = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<any>(null);
-  const leafletRef = useRef<any>(null);
   const markers = useRef<any[]>([]);
   const routeLine = useRef<any>(null);
 
@@ -102,37 +100,44 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    async function createMap() {
+    function createMap() {
       if (!mapElement.current || mapInstance.current) return;
+      const naver = (window as any).naver;
+      if (!naver?.maps) return;
 
-      const L = (await import("leaflet")).default;
-      if (cancelled) return;
-
-      leafletRef.current = L;
-
-      const map = L.map(mapElement.current, {
-        center: [36.019, 129.3435],
+      const map = new naver.maps.Map(mapElement.current, {
+        center: new naver.maps.LatLng(36.019, 129.3435),
         zoom: 11,
         zoomControl: true,
+        zoomControlOptions: { position: naver.maps.Position.TOP_RIGHT },
       });
 
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19,
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      }).addTo(map);
-
       mapInstance.current = map;
-      setTimeout(() => map.invalidateSize(), 300);
+      setTimeout(() => naver.maps.Event.trigger(map, "resize"), 300);
     }
 
-    createMap();
+    // 네이버지도 스크립트(layout.tsx의 beforeInteractive Script)가 이미 로드됐다면 바로 생성,
+    // 아직이면 로드될 때까지 짧게 폴링합니다.
+    if ((window as any).naver?.maps) {
+      createMap();
+    } else {
+      pollTimer = setInterval(() => {
+        if (cancelled) return;
+        if ((window as any).naver?.maps) {
+          createMap();
+          if (pollTimer) clearInterval(pollTimer);
+        }
+      }, 150);
+    }
 
     return () => {
       cancelled = true;
+      if (pollTimer) clearInterval(pollTimer);
       if (mapInstance.current) {
-        mapInstance.current.remove();
+        const naver = (window as any).naver;
+        naver?.maps?.Event?.clearInstanceListeners(mapInstance.current);
         mapInstance.current = null;
       }
     };
@@ -140,12 +145,20 @@ export default function Home() {
 
   function placeStartMarker(lat: number, lng: number, zoom = 14) {
     const map = mapInstance.current;
-    const L = leafletRef.current;
-    if (!map || !L) return;
+    const naver = (window as any).naver;
+    if (!map || !naver) return;
 
-    map.setView([lat, lng], zoom);
-    const marker = L.marker([lat, lng]);
-    marker.addTo(map).bindPopup("<b>출발지</b>").openPopup();
+    map.setCenter(new naver.maps.LatLng(lat, lng));
+    map.setZoom(zoom);
+
+    const marker = new naver.maps.Marker({
+      position: new naver.maps.LatLng(lat, lng),
+      map,
+    });
+    const info = new naver.maps.InfoWindow({
+      content: '<div class="info-window"><b>출발지</b></div>',
+    });
+    info.open(map, marker);
     markers.current.push(marker);
   }
 
@@ -304,53 +317,60 @@ export default function Home() {
   }
 
   function clearMapObjects() {
-    const map = mapInstance.current;
-    if (!map) return;
-
-    markers.current.forEach((marker) => map.removeLayer(marker));
+    markers.current.forEach((marker) => marker.setMap(null));
     markers.current = [];
 
     if (routeLine.current) {
-      map.removeLayer(routeLine.current);
+      routeLine.current.setMap(null);
       routeLine.current = null;
     }
   }
 
   useEffect(() => {
     const map = mapInstance.current;
-    const L = leafletRef.current;
-    if (!map || !L || !courses.length) return;
+    const naver = (window as any).naver;
+    if (!map || !naver || !courses.length) return;
 
     clearMapObjects();
 
-    const bounds: any[] = [];
+    const points: any[] = [];
 
     if (latitude !== null && longitude !== null) {
-      const currentMarker = L.marker([latitude, longitude]);
-      currentMarker.addTo(map).bindPopup("<b>출발지</b>");
+      const currentPos = new naver.maps.LatLng(latitude, longitude);
+      const currentMarker = new naver.maps.Marker({ position: currentPos, map });
+      const currentInfo = new naver.maps.InfoWindow({
+        content: '<div class="info-window"><b>출발지</b></div>',
+      });
+      naver.maps.Event.addListener(currentMarker, "click", () => currentInfo.open(map, currentMarker));
       markers.current.push(currentMarker);
-      bounds.push([latitude, longitude]);
+      points.push(currentPos);
     }
 
     courses.forEach((course) => {
       const lat = Number(course.destination.y);
       const lng = Number(course.destination.x);
+      const pos = new naver.maps.LatLng(lat, lng);
 
-      const marker = L.marker([lat, lng]);
-      marker.addTo(map).bindPopup(
-        `<div style="min-width:180px;line-height:1.6;">
+      const marker = new naver.maps.Marker({ position: pos, map });
+      const info = new naver.maps.InfoWindow({
+        content: `<div class="info-window" style="min-width:180px;">
           <b>추천 ${course.rank}</b><br/>
           ${course.destination.place_name}<br/>
           <span style="color:#1d4ed8;font-weight:800;">${course.score}점</span>
-        </div>`
-      );
-      marker.on("click", () => selectCourse(course));
+        </div>`,
+      });
+      naver.maps.Event.addListener(marker, "click", () => {
+        info.open(map, marker);
+        selectCourse(course);
+      });
       markers.current.push(marker);
-      bounds.push([lat, lng]);
+      points.push(pos);
     });
 
-    if (bounds.length > 1) {
-      map.fitBounds(L.latLngBounds(bounds), { padding: [80, 80] });
+    if (points.length > 1) {
+      const bounds = new naver.maps.LatLngBounds(points[0], points[0]);
+      points.forEach((p) => bounds.extend(p));
+      map.fitBounds(bounds, { top: 80, right: 80, bottom: 80, left: 80 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [courses, latitude, longitude]);
@@ -359,51 +379,75 @@ export default function Home() {
     setSelectedCourse(course);
 
     const map = mapInstance.current;
-    const L = leafletRef.current;
-    if (!map || !L) return;
+    const naver = (window as any).naver;
+    if (!map || !naver) return;
 
     clearMapObjects();
 
     const points: any[] = [];
 
     if (latitude !== null && longitude !== null) {
-      const currentMarker = L.marker([latitude, longitude]);
-      currentMarker.addTo(map).bindPopup("<b>출발지</b>");
+      const currentPos = new naver.maps.LatLng(latitude, longitude);
+      const currentMarker = new naver.maps.Marker({ position: currentPos, map });
+      const currentInfo = new naver.maps.InfoWindow({
+        content: '<div class="info-window"><b>출발지</b></div>',
+      });
+      naver.maps.Event.addListener(currentMarker, "click", () => currentInfo.open(map, currentMarker));
       markers.current.push(currentMarker);
-      points.push([latitude, longitude]);
+      points.push(currentPos);
     }
 
     const destLat = Number(course.destination.y);
     const destLng = Number(course.destination.x);
+    const destPos = new naver.maps.LatLng(destLat, destLng);
 
-    const destinationMarker = L.marker([destLat, destLng]);
-    destinationMarker
-      .addTo(map)
-      .bindPopup(`<b>${course.destination.place_name}</b>`)
-      .openPopup();
+    const destinationMarker = new naver.maps.Marker({ position: destPos, map });
+    const destinationInfo = new naver.maps.InfoWindow({
+      content: `<div class="info-window"><b>${course.destination.place_name}</b></div>`,
+    });
+    naver.maps.Event.addListener(destinationMarker, "click", () =>
+      destinationInfo.open(map, destinationMarker)
+    );
+    destinationInfo.open(map, destinationMarker);
     markers.current.push(destinationMarker);
-    points.push([destLat, destLng]);
+    points.push(destPos);
 
     if (course.routeCoordinates && course.routeCoordinates.length > 1) {
-      const routePoints = course.routeCoordinates;
-      routeLine.current = L.polyline(routePoints, {
-        weight: 6,
-        opacity: 0.9,
-        color: "#1d4ed8",
-      }).addTo(map);
-      map.fitBounds(L.latLngBounds(routePoints), { padding: [80, 80] });
+      const routePoints = course.routeCoordinates.map(
+        ([lat, lng]) => new naver.maps.LatLng(lat, lng)
+      );
+      routeLine.current = new naver.maps.Polyline({
+        map,
+        path: routePoints,
+        strokeWeight: 6,
+        strokeOpacity: 0.9,
+        strokeColor: "#1d4ed8",
+      });
+      const bounds = new naver.maps.LatLngBounds(routePoints[0], routePoints[0]);
+      routePoints.forEach((p: any) => bounds.extend(p));
+      map.fitBounds(bounds, { top: 80, right: 80, bottom: 80, left: 80 });
     } else if (points.length >= 2) {
-      routeLine.current = L.polyline(points, {
-        weight: 4,
-        opacity: 0.6,
-        color: "#94a3b8",
-        dashArray: "10 10",
-      })
-        .addTo(map)
-        .bindPopup("실제 도로 경로를 가져오지 못해 직선으로 표시 중입니다.");
-      map.fitBounds(L.latLngBounds(points), { padding: [80, 80] });
+      routeLine.current = new naver.maps.Polyline({
+        map,
+        path: points,
+        strokeWeight: 4,
+        strokeOpacity: 0.6,
+        strokeColor: "#94a3b8",
+        strokeStyle: "shortdash",
+      });
+      const routeInfo = new naver.maps.InfoWindow({
+        content:
+          '<div class="info-window">실제 도로 경로를 가져오지 못해 직선으로 표시 중입니다.</div>',
+      });
+      naver.maps.Event.addListener(routeLine.current, "click", () =>
+        routeInfo.open(map, destPos)
+      );
+      const bounds = new naver.maps.LatLngBounds(points[0], points[0]);
+      points.forEach((p) => bounds.extend(p));
+      map.fitBounds(bounds, { top: 80, right: 80, bottom: 80, left: 80 });
     } else {
-      map.setView([destLat, destLng], 13);
+      map.setCenter(destPos);
+      map.setZoom(13);
     }
   }
 
