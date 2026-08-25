@@ -199,7 +199,10 @@ export default function Home() {
     }
 
     if (latitude === null || longitude === null) {
-      alert("출발지가 아직 설정되지 않았습니다. 현재 위치를 허용하거나 출발지를 입력 후 확인해주세요.");
+      alert(
+        "출발지 위치를 아직 확인하지 못했습니다. 위치 권한 요청 팝업이 있다면 '허용'을 눌러주세요. 이어서 다시 위치를 요청합니다 — 확인되면 버튼을 한 번 더 눌러주세요."
+      );
+      getMyLocation();
       return;
     }
 
@@ -553,6 +556,11 @@ export default function Home() {
               )}
               {!isCurrentLocation && latitude !== null && (
                 <p className="mt-1 text-[11px] text-blue-600">이 위치를 출발지로 사용합니다</p>
+              )}
+              {isCurrentLocation && latitude === null && (
+                <p className="mt-1 text-[11px] font-medium text-amber-600">
+                  위치를 아직 확인 못했습니다. 위 📍 버튼을 눌러 위치 권한을 허용해주세요.
+                </p>
               )}
 
               <div className="mt-3 grid grid-cols-2 gap-2">
