@@ -15,6 +15,8 @@ type UserRequest = {
   start?: string;
   durationHours?: number; // 가능 시간 (숫자, 시간 단위)
   routeType?: string; // "왕복" | "편도"
+  avoidVisited?: boolean;
+  visitedPlaces?: string[];
 };
 
 type Place = {
@@ -171,6 +173,103 @@ function findBlogForPlace(placeName: string, addressName: string): BlogPost | nu
   const text = `${placeName} ${addressName}`;
   const matches = findRelevantBlogs(text, 1);
   return matches[0] || null;
+}
+
+/* ==================================================
+   실시간 날씨 (Open-Meteo, 무료·키 불필요)
+   맑은 날엔 뷰포인트/경치, 흐리거나 비/눈 오는 날엔 실내(카페/맛집) 위주로
+   추천 방향을 바꾸는 데 사용합니다.
+================================================== */
+
+type WeatherInfo = { label: string; kind: "clear" | "cloudy" | "rain" | "snow" | "unknown"; temperature: number };
+
+function classifyWeatherCode(code: number): { label: string; kind: WeatherInfo["kind"] } {
+  if (code === 0) return { label: "맑음", kind: "clear" };
+  if ([1, 2].includes(code)) return { label: "대체로 맑음", kind: "clear" };
+  if (code === 3) return { label: "흐림", kind: "cloudy" };
+  if ([45, 48].includes(code)) return { label: "안개", kind: "cloudy" };
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return { label: "비", kind: "rain" };
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return { label: "눈", kind: "snow" };
+  if ([95, 96, 99].includes(code)) return { label: "뇌우", kind: "rain" };
+  return { label: "알 수 없음", kind: "unknown" };
+}
+
+async function getCurrentWeather(lat: number, lon: number): Promise<WeatherInfo | null> {
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&timezone=Asia%2FSeoul`;
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const cw = data?.current_weather;
+    if (!cw) return null;
+
+    const info = classifyWeatherCode(cw.weathercode);
+    return { label: info.label, kind: info.kind, temperature: cw.temperature };
+  } catch (error) {
+    console.log("[recommend] 날씨 조회 실패:", error);
+    return null;
+  }
+}
+
+/* ==================================================
+   반려동반 가능 명소 큐레이션 (실제 검색으로 확인, 수동 관리)
+   TMAP/OSM 검색 결과에는 반려동반 가능 여부가 없어서, 실제로 반려동반이
+   가능하다고 확인된 곳만 별도 데이터로 관리합니다. AI 참고자료로만 사용합니다.
+================================================== */
+
+type PetFriendlySpot = { name: string; note: string; regionKeywords: string[] };
+
+const PET_FRIENDLY_SPOTS: PetFriendlySpot[] = [
+  {
+    name: "설악해맞이공원",
+    note: "속초 해변 산책로, 반려견 동반 산책 명소로 잘 알려짐",
+    regionKeywords: ["속초", "강원", "동해"],
+  },
+  {
+    name: "국립산음자연휴양림",
+    note: "반려견 동반 가능 국립휴양림",
+    regionKeywords: ["산음", "괴산", "충북"],
+  },
+  {
+    name: "가평애견파크 (가평 휴게소 인근 펫 테마파크)",
+    note: "반려견 전용 놀이 공간을 갖춘 펫 테마파크",
+    regionKeywords: ["가평", "경기"],
+  },
+  {
+    name: "모네의 정원 (파주)",
+    note: "넓은 잔디마당, 실내외 모두 반려견 동반 가능한 카페",
+    regionKeywords: ["파주", "경기"],
+  },
+  {
+    name: "바우하우스 (성수동)",
+    note: "반려동물 전용 구역이 있는 실내 대형 카페",
+    regionKeywords: ["성수", "서울", "성동구"],
+  },
+  {
+    name: "개린이네 (용인 기흥)",
+    note: "잔디마당을 여러 구역으로 나눠 중대형견도 뛰놀 수 있는 애견카페",
+    regionKeywords: ["용인", "기흥", "경기"],
+  },
+];
+
+function findPetFriendlySpots(text: string, limit = 3): PetFriendlySpot[] {
+  const scored = PET_FRIENDLY_SPOTS.map((spot) => {
+    const score = spot.regionKeywords.reduce(
+      (count, keyword) => count + (text.includes(keyword) ? 1 : 0),
+      0
+    );
+    return { spot, score };
+  }).filter((item) => item.score > 0);
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((item) => item.spot);
+}
+
+const PET_KEYWORDS = ["반려견", "반려동물", "강아지", "댕댕이", "애견", "멍멍이", "펫"];
+
+function isPetTrip(query: string) {
+  return PET_KEYWORDS.some((keyword) => query.includes(keyword));
 }
 
 async function searchTmapPOI(query: string, count = 5): Promise<Place[]> {
@@ -606,8 +705,23 @@ export async function POST(request: Request) {
 
     const currentRegion = await getCurrentRegion(body.latitude, body.longitude);
 
+    const avoidVisited = !!body.avoidVisited;
+    const visitedPlaces = Array.isArray(body.visitedPlaces) ? body.visitedPlaces.slice(0, 30) : [];
+    const petTrip = isPetTrip(query);
+
     /* ------------------------------
-       0) 큐레이션된 인기 드라이브 블로그에서 관련 글 매칭 (AI 참고자료, API 호출 없음)
+       0-1) 실시간 날씨 확인 (Open-Meteo, API 키 불필요)
+    ------------------------------ */
+
+    const weather =
+      typeof body.latitude === "number" && typeof body.longitude === "number"
+        ? await getCurrentWeather(body.latitude, body.longitude)
+        : null;
+
+    if (weather) console.log(`[recommend] 현재 날씨: ${weather.label} ${weather.temperature}°C`);
+
+    /* ------------------------------
+       0-2) 큐레이션된 인기 드라이브 블로그에서 관련 글 매칭 (AI 참고자료, API 호출 없음)
     ------------------------------ */
 
     let blogContext = "";
@@ -618,6 +732,19 @@ export async function POST(request: Request) {
         .map((b, i) => `${i + 1}. [${b.title}] ${b.description}`)
         .join("\n");
       console.log(`[recommend] 큐레이션 블로그 매칭 ${matchedBlogs.length}건`);
+    }
+
+    /* ------------------------------
+       0-3) 반려동반 여행이면 확인된 반려동반 가능 명소 매칭
+    ------------------------------ */
+
+    let petContext = "";
+    if (petTrip) {
+      const matchedPetSpots = findPetFriendlySpots(`${currentRegion} ${query}`, 3);
+      if (matchedPetSpots.length > 0) {
+        petContext = matchedPetSpots.map((s, i) => `${i + 1}. ${s.name} - ${s.note}`).join("\n");
+      }
+      console.log("[recommend] 반려동반 여행 감지, 확인된 매칭:", matchedPetSpots.length);
     }
 
     /* ------------------------------
@@ -654,6 +781,22 @@ ${query}
 가능 시간: 총 ${durationHours}시간 (${routeType})
 ${routeType === "왕복" ? `→ 이동+관광을 포함해 왕복으로 총 ${durationHours}시간을 쓸 수 있음. 편도 이동시간은 대략 ${Math.max(15, Math.round((durationHours * 60) / 2.5))}분 전후를 목표로 할 것.` : `→ 편도로 최대 ${durationHours}시간(${durationHours * 60}분)까지 이동 가능. 목표 편도 이동시간은 대략 ${Math.max(15, Math.round(durationHours * 60 * 0.7))}분 전후로 할 것.`}
 ${
+  weather
+    ? `\n[현재 날씨] ${weather.label}, 기온 ${weather.temperature}°C
+- 맑음일 때는 뷰포인트/해변/전망대 등 야외 경치 명소를 우선 고려할 것.
+- 비/눈/흐림/안개일 때는 카페/맛집/실내 명소 비중을 높여서 추천할 것.\n`
+    : ""
+}${
+  petTrip
+    ? `\n[반려동반 여행] 사용자가 반려동물과 함께 가는 드라이브를 원함.
+- 실내든 야외든 반려동물 동반이 실제로 가능한 곳만 추천할 것 (일반 실내 식당·카페는 반려동반이 안 되는 경우가 많으니 주의).
+${petContext ? `- 아래는 실제로 반려동반 가능이 확인된 장소들이니 지역이 맞으면 최대한 우선 사용할 것:\n${petContext}` : "- 확인된 참고 장소가 없으면, 반려동반 카페/공원/해변 산책로처럼 통상 반려동반이 흔히 허용되는 유형의 장소를 선택하고 reason에 '반려동반 가능 여부는 방문 전 확인 필요'라고 명시할 것."}\n`
+    : ""
+}${
+  avoidVisited && visitedPlaces.length > 0
+    ? `\n[제외할 장소 - 이미 다녀온 곳] 아래 장소들은 절대 다시 추천하지 말 것:\n${visitedPlaces.join(", ")}\n`
+    : ""
+}${
   blogContext
     ? `\n[참고: 실제로 많이 언급되는 인기 드라이브 코스 블로그 정보]\n${blogContext}\n\n위 블로그들에서 실제로 언급되는 구체적인 명소/코스가 있다면 최대한 우선적으로 활용할 것 (실제로 검증된 인기 드라이브 코스라는 뜻).\n`
     : ""
@@ -745,6 +888,17 @@ ${
         return null;
       }
 
+      if (avoidVisited && visitedPlaces.length > 0) {
+        const alreadyVisited = visitedPlaces.some(
+          (visited) =>
+            destination.place_name.includes(visited) || visited.includes(destination.place_name)
+        );
+        if (alreadyVisited) {
+          console.log("[recommend] 이미 다녀온 곳이라 제외:", destination.place_name);
+          return null;
+        }
+      }
+
       usedPlaceIds.add(destination.id);
 
       const destLat = Number(destination.y);
@@ -826,6 +980,7 @@ ${
       intent: { summary: aiResult.summary, musicMood: aiResult.musicMood },
       aiComment: aiResult.summary,
       courses,
+      weather,
       notice: TMAP_API_KEY
         ? "거리·시간·경로는 TMAP 실제 도로 데이터 기준입니다."
         : "거리·시간은 실제 도로 경로(OSRM) 기준입니다. TMAP API 키를 등록하면 더 정확하고 빨라집니다.",

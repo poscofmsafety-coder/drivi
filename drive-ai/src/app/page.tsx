@@ -15,6 +15,11 @@ import {
   Play,
   Dice5,
   Locate,
+  Sun,
+  Cloud,
+  CloudRain,
+  CloudSnow,
+  Sparkles,
 } from "lucide-react";
 
 type Place = {
@@ -55,6 +60,18 @@ const QUICK_QUERIES = [
   "맛있는 거 먹으러 가자",
 ];
 
+type WeatherInfo = { label: string; kind: "clear" | "cloudy" | "rain" | "snow" | "unknown"; temperature: number };
+
+const WEATHER_ICON: Record<WeatherInfo["kind"], any> = {
+  clear: Sun,
+  cloudy: Cloud,
+  rain: CloudRain,
+  snow: CloudSnow,
+  unknown: Cloud,
+};
+
+const VISITED_STORAGE_KEY = "driveai_visited_places";
+
 export default function Home() {
   const mapElement = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<any>(null);
@@ -79,6 +96,9 @@ export default function Home() {
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [musicMood, setMusicMood] = useState("AI 추천 준비 중");
+  const [weather, setWeather] = useState<WeatherInfo | null>(null);
+  const [avoidVisited, setAvoidVisited] = useState(false);
+  const [visitedPlaces, setVisitedPlaces] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -156,6 +176,37 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, []);
 
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(VISITED_STORAGE_KEY);
+      if (saved) setVisitedPlaces(JSON.parse(saved));
+    } catch (error) {
+      console.error("[page] 방문 기록 불러오기 실패:", error);
+    }
+  }, []);
+
+  function markVisited(placeName: string) {
+    setVisitedPlaces((prev) => {
+      if (prev.includes(placeName)) return prev;
+      const next = [...prev, placeName].slice(-30);
+      try {
+        localStorage.setItem(VISITED_STORAGE_KEY, JSON.stringify(next));
+      } catch (error) {
+        console.error("[page] 방문 기록 저장 실패:", error);
+      }
+      return next;
+    });
+  }
+
+  function resetVisited() {
+    setVisitedPlaces([]);
+    try {
+      localStorage.removeItem(VISITED_STORAGE_KEY);
+    } catch (error) {
+      console.error("[page] 방문 기록 초기화 실패:", error);
+    }
+  }
+
   async function confirmCustomStart() {
     const trimmed = start.trim();
     if (!trimmed || trimmed === "현재 위치") {
@@ -222,6 +273,8 @@ export default function Home() {
           routeType,
           latitude,
           longitude,
+          avoidVisited,
+          visitedPlaces,
         }),
       });
 
@@ -241,6 +294,7 @@ export default function Home() {
       setMusicMood(data.intent?.musicMood || "드라이브 믹스");
       setCourses(data.courses || []);
       setNotice(data.notice || "");
+      setWeather(data.weather || null);
     } catch (error) {
       console.error("[page] recommend() 오류:", error);
       setAiComment(error instanceof Error ? error.message : "오류가 발생했습니다.");
@@ -396,6 +450,8 @@ export default function Home() {
   }
 
   function startKakaoNavi(course: Course) {
+    markVisited(course.destination.place_name);
+
     const name = course.destination.place_name;
     const destLat = course.destination.y;
     const destLng = course.destination.x;
@@ -411,6 +467,8 @@ export default function Home() {
   }
 
   function startNaverNavi(course: Course) {
+    markVisited(course.destination.place_name);
+
     const name = encodeURIComponent(course.destination.place_name);
     const destX = course.destination.x;
     const destY = course.destination.y;
@@ -437,6 +495,8 @@ export default function Home() {
   }
 
   function startTmapNavi(course: Course) {
+    markVisited(course.destination.place_name);
+
     const name = encodeURIComponent(course.destination.place_name);
     const destLat = course.destination.y;
     const destLng = course.destination.x;
@@ -597,12 +657,51 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+
+              <button
+                onClick={() => setAvoidVisited((v) => !v)}
+                className={`mt-2 flex w-full items-center justify-between rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                  avoidVisited
+                    ? "border-blue-600 bg-blue-50 text-blue-700"
+                    : "border-slate-200 text-slate-500 hover:bg-slate-50"
+                }`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <Sparkles size={13} /> 안 가본 곳 위주로 추천
+                  {visitedPlaces.length > 0 && (
+                    <span className="text-slate-400">(기록 {visitedPlaces.length}곳)</span>
+                  )}
+                </span>
+                {visitedPlaces.length > 0 && (
+                  <span
+                    role="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      resetVisited();
+                    }}
+                    className="text-[11px] font-normal text-slate-400 underline hover:text-slate-600"
+                  >
+                    기록 초기화
+                  </span>
+                )}
+              </button>
             </div>
 
             <div className="p-5">
-              <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                Drive Assistant
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                  Drive Assistant
+                </p>
+                {weather && (
+                  <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600">
+                    {(() => {
+                      const WeatherIcon = WEATHER_ICON[weather.kind];
+                      return <WeatherIcon size={12} />;
+                    })()}
+                    {weather.label} {Math.round(weather.temperature)}°C
+                  </span>
+                )}
+              </div>
               <div className="mt-2 whitespace-pre-line rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-700">
                 {aiComment}
               </div>
